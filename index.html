@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AeroSync - Web Client</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+    <!-- Role Selection Overlay -->
+    <div id="role-selection-overlay">
+        <div class="glass-panel text-center">
+            <h1>AeroSync</h1>
+            <p>Select your mode</p>
+            <div class="role-buttons">
+                <button id="btn-role-client" class="menu-btn menu-btn-primary">🖥️ Join a Session</button>
+                <button id="btn-role-host" class="menu-btn menu-btn-secondary">📤 Share this Screen</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Client Connection Overlay -->
+    <div id="client-connection-overlay" class="hidden">
+        <div class="glass-panel">
+            <button class="back-btn" id="client-back-btn">← Back</button>
+            <h1>Connect to Remote Host</h1>
+            <p>Enter the Host Connection ID</p>
+            <div class="input-group">
+                <input type="text" id="host-id-input" placeholder="e.g. 1a2b-3c4d">
+                <button id="connect-btn">Connect</button>
+            </div>
+            <div id="client-status-msg">
+                <span id="signal-dot" style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#8b949e; margin-right:5px;"></span>
+                <span id="client-status-text">Ready.</span>
+            </div>
+            <button class="open-network-settings-btn text-link" style="margin-top: 15px; font-size: 0.8rem; background: none; border: none; color: #58a6ff; cursor: pointer; text-decoration: underline;">🌐 Connection Troubleshooting (VPN/Firewall)</button>
+        </div>
+    </div>
+
+    <!-- Network Settings Overlay -->
+    <div id="network-settings-overlay" class="hidden">
+        <div class="glass-panel">
+            <button class="back-btn" id="network-back-btn">← Back</button>
+            <h1>Network Settings</h1>
+            <p style="font-size: 0.85rem; margin-bottom: 20px; color: #8b949e;">If you are behind a strict firewall or VPN, you may need a <strong>TURN Relay Server</strong>.</p>
+            
+            <div style="background: rgba(88, 166, 255, 0.1); border: 1px solid rgba(88, 166, 255, 0.2); padding: 12px; border-radius: 8px; font-size: 0.8rem; margin-bottom: 15px; text-align: left;">
+                <strong>💡 Get a FREE Relay Key:</strong>
+                <ol style="margin-top: 10px; padding-left: 20px;">
+                    <li>Go to <a href="https://www.metered.ca/tools/openrelay/" target="_blank" style="color: #58a6ff;">Metered OpenRelay</a></li>
+                    <li>Copy one of the <strong>TURN</strong> URLs (e.g. <code>turn:global.relay...</code>)</li>
+                    <li>Paste it below and click Save.</li>
+                </ol>
+            </div>
+
+            <div class="settings-group">
+                <label>Custom STUN/TURN Server (Optional)</label>
+                <input type="text" id="custom-ice-server" placeholder="stun:stun.l.google.com:19302">
+                <p style="font-size: 0.7rem; color: #8b949e; margin-top: 5px;">Format: stun:host:port or turn:user:pass@host:port</p>
+            </div>
+
+            <div class="settings-group" style="display: flex; align-items: center; gap: 10px; margin-top: 15px;">
+                <input type="checkbox" id="force-relay-mode" style="width: auto; margin: 0;">
+                <label for="force-relay-mode" style="margin: 0; color: #c9d1d9;">🚀 Force Relay Mode (Highly Recommended for VPN)</label>
+            </div>
+            
+            <button id="save-network-settings" class="menu-btn menu-btn-primary" style="margin-top: 20px;">Save & Restart</button>
+        </div>
+    </div>
+
+    <!-- Web Host Overlay -->
+    <div id="web-host-overlay" class="hidden">
+        <div class="glass-panel text-center">
+            <button class="back-btn" id="host-back-btn">← Back</button>
+            <h1>Share this Screen</h1>
+            <p>Your Connection ID:</p>
+            <div class="id-display-box" id="web-host-id-display">Generating...</div>
+            <button id="start-share-btn" class="menu-btn menu-btn-primary hidden" style="margin-bottom: 1rem;">Start Sharing</button>
+            <div id="host-status-msg">
+                <span id="host-signal-dot" style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#8b949e; margin-right:5px;"></span>
+                <span id="host-status-text">Initializing...</span>
+            </div>
+            
+            <button class="open-network-settings-btn text-link" style="margin-top: 15px; font-size: 0.8rem; background: none; border: none; color: #58a6ff; cursor: pointer; text-decoration: underline;">🌐 Connection Troubleshooting (VPN/Firewall)</button>
+            
+            <div class="edit-mode-banner">
+                <style>
+                    .safety-notice {
+                        background: rgba(88, 166, 255, 0.05);
+                        border: 1px solid rgba(88, 166, 255, 0.2);
+                        border-radius: 8px;
+                        padding: 12px;
+                        margin-top: 15px;
+                        text-align: left;
+                        font-size: 0.8rem;
+                        color: #c9d1d9;
+                    }
+                    .safety-notice strong { color: #58a6ff; }
+                    .download-btn-pro {
+                        display: inline-flex;
+                        align-items: center;
+                        gap: 8px;
+                        background: #238636;
+                        color: white !important;
+                        text-decoration: none !important;
+                        padding: 8px 16px;
+                        border-radius: 6px;
+                        font-weight: 600;
+                        margin-top: 10px;
+                        transition: all 0.2s;
+                    }
+                    .download-btn-pro:hover {
+                        background: #2ea043;
+                    }
+                </style>
+                <p>Want remote <strong>mouse & keyboard</strong> control?</p>
+                <a href="https://github.com/purnappc9/remote/raw/main/AeroSync-Setup.exe" class="download-btn-pro" download>
+                    📥 Download AeroSync Installer
+                </a>
+                
+                <div class="safety-notice">
+                    <strong>🛡️ Safety Info:</strong> Since this is a new app, Windows may say "More Info". Click it, then choose <strong>"Run anyway"</strong>. We guarantee this file is 100% safe and secure.
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Active Session Container (Video Player) -->
+    <div id="session-container" class="hidden">
+        <div class="top-bar glass">
+            <span class="host-info">Connected to: <strong id="connected-id-display">...</strong></span>
+            <div class="top-bar-actions">
+                <button id="record-btn" class="secondary-btn" title="Record Session">🔴 Record</button>
+                <button id="toggle-control-btn" class="secondary-btn" title="Toggle Controls (Shortcut: ESC)">Controls: ON</button>
+                <button id="disconnect-btn" class="danger-btn">Disconnect</button>
+            </div>
+        </div>
+        
+        <div class="video-wrapper">
+            <video id="remote-video" autoplay playsinline></video>
+            
+            <!-- Mobile Controls Overlay -->
+            <div id="mobile-controls" class="hidden">
+                <button id="mobile-keyboard-btn" class="glass floating-btn" title="Toggle Keyboard">⌨️</button>
+                
+                <div class="trackpad-panel glass" id="trackpad-panel">
+                    <div id="drag-handle">
+                        ⣿⣿
+                        <button id="hide-trackpad-btn" title="Hide Trackpad">×</button>
+                    </div>
+                    <div id="virtual-trackpad">
+                        <span>TRACKPAD</span>
+                    </div>
+                    <div class="mouse-buttons">
+                        <button id="mobile-left-click" title="Left Click">L</button>
+                        <button id="mobile-right-click" title="Right Click">R</button>
+                    </div>
+                    <div id="resize-handle">↘</div>
+                </div>
+                <button id="show-trackpad-btn" class="glass floating-btn hidden" title="Show Trackpad">🖱️</button>
+                <!-- Hidden input field to force mobile keyboard to open -->
+                <input type="text" id="hidden-keyboard-input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="position: absolute; opacity: 0; pointer-events: none; z-index: -1;">
+            </div>
+        </div>
+    </div>
+
+    <!-- Load PeerJS Locally (To bypass VPN blocks) -->
+    <script src="peerjs.min.js"></script>
+    <script src="app.js"></script>
+
+</body>
+</html>
