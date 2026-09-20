@@ -1,18 +1,54 @@
+// Firewall-friendly ICE list: STUN for direct paths, TURN over UDP/TCP 80 and TCP/TLS 443
+// so media can be relayed even when only web ports are open (corporate firewalls, VPNs, CGNAT).
+const OPEN_RELAY_USER = 'openrelayproject';
 const COMMON_ICE_SERVERS = [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
-    { urls: 'stun:stun.voipstunt.com' },
-    { urls: 'stun:stun.voxgratia.org' },
-    { urls: 'stun:stun.ekiga.net' },
-    { urls: 'stun:stun.ideasip.com' },
-    { urls: 'stun:stun.schlund.de' },
-    { urls: 'stun:stun.voiparound.com' },
-    { urls: 'stun:stun.voipbuster.com' },
-    { urls: 'stun:stun.voipstunt.com' }
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:global.stun.twilio.com:3478'] },
+    { urls: 'stun:openrelay.metered.ca:80' },
+    {
+        urls: [
+            'turn:openrelay.metered.ca:80',
+            'turn:openrelay.metered.ca:80?transport=tcp',
+            'turn:openrelay.metered.ca:443',
+            'turns:openrelay.metered.ca:443?transport=tcp'
+        ],
+        username: OPEN_RELAY_USER,
+        credential: OPEN_RELAY_USER
+    }
 ];
+
+// Signaling servers tried in order. First entry is the public PeerJS cloud (wss on 443).
+// A custom server (Network Settings) is tried first when configured.
+const DEFAULT_SIGNALING = [{ host: '0.peerjs.com', port: 443, path: '/', secure: true }];
+let signalingIndex = 0;
+let signalingRetries = 0;
+const MAX_SIGNALING_RETRIES = 6;
+
+// Parse "turn:user:pass@host:port[?transport=tcp]" (or plain stun:/turn: URL) into an RTCIceServer.
+function parseIceServer(raw) {
+    raw = (raw || '').trim();
+    const m = raw.match(/^(stuns?|turns?):(?:([^:@\/]+):([^@\/]+)@)?(.+)$/i);
+    if (!m) return null;
+    const server = { urls: `${m[1].toLowerCase()}:${m[4]}` };
+    if (m[2]) { server.username = decodeURIComponent(m[2]); server.credential = decodeURIComponent(m[3]); }
+    return server;
+}
+
+// Parse "host[:port][/path]" (prefix wss:// or ws:// optional) into PeerJS server options.
+function parseSignalingServer(raw) {
+    raw = (raw || '').trim();
+    if (!raw) return null;
+    const m = raw.match(/^(?:(wss?|https?):\/\/)?([^:\/]+)(?::(\d+))?(\/.*)?$/i);
+    if (!m) return null;
+    const secure = !m[1] || /^(wss|https)$/i.test(m[1]);
+    return { host: m[2], port: m[3] ? parseInt(m[3], 10) : (secure ? 443 : 80), path: m[4] || '/', secure };
+}
+
+function getSignalingList() {
+    const list = [];
+    const custom = parseSignalingServer(localStorage.getItem('aerosync_signaling'));
+    if (custom) list.push(custom);
+    return list.concat(DEFAULT_SIGNALING);
+}
 
 let signalingStatus = 'checking'; // 'ok' | 'blocked' | 'checking'
 
@@ -30,6 +66,7 @@ const openNetworkSettingsBtns = document.querySelectorAll('.open-network-setting
 const saveNetworkSettingsBtn = document.getElementById('save-network-settings');
 const customIceServerInput = document.getElementById('custom-ice-server');
 const forceRelayCheckbox = document.getElementById('force-relay-mode');
+const customSignalingInput = document.getElementById('custom-signaling-server');
 
 const sessionContainer = document.getElementById('session-container');
 const recordBtn = document.getElementById('record-btn');
@@ -59,6 +96,8 @@ let remoteStream = null;
 let mediaRecorder = null;
 let recordedChunks = [];
 let isRecording = false;
+let mediaCall = null;
+let isConnected = false;
 
 function generateShortId() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -109,7 +148,8 @@ networkBackBtn.addEventListener('click', () => {
 openNetworkSettingsBtns.forEach(btn => {
     btn.addEventListener('click', () => {
         const savedIce = localStorage.getItem('aerosync_custom_ice');
-        if (savedIce) customIceServerInput.value = savedIce;
+        customIceServerInput.value = savedIce || '';
+        customSignalingInput.value = localStorage.getItem('aerosync_signaling') || '';
         
         const isForced = localStorage.getItem('aerosync_force_relay') === 'true';
         forceRelayCheckbox.checked = isForced;
@@ -120,42 +160,71 @@ openNetworkSettingsBtns.forEach(btn => {
 
 saveNetworkSettingsBtn.addEventListener('click', () => {
     const server = customIceServerInput.value.trim();
-    if (server) {
+    if (server && parseIceServer(server)) {
         localStorage.setItem('aerosync_custom_ice', server);
     } else {
         localStorage.removeItem('aerosync_custom_ice');
     }
     
+    const sig = customSignalingInput.value.trim();
+    if (sig && parseSignalingServer(sig)) localStorage.setItem('aerosync_signaling', sig);
+    else localStorage.removeItem('aerosync_signaling');
+
     localStorage.setItem('aerosync_force_relay', forceRelayCheckbox.checked ? 'true' : 'false');
     
     alert('Settings saved. Restarting application...');
     location.reload();
 });
 
-function initPeer(customId = null) {
+function initPeer(customId = null, isRetry = false) {
     if (peer) { peer.destroy(); }
-    
-    let iceServers = [...COMMON_ICE_SERVERS];
-    const customIce = localStorage.getItem('aerosync_custom_ice');
-    if (customIce && customIce.includes(':')) {
-        iceServers.unshift({ urls: customIce });
-    }
+    if (!isRetry) { signalingIndex = 0; signalingRetries = 0; }
+
+    const iceServers = [...COMMON_ICE_SERVERS];
+    const customIce = parseIceServer(localStorage.getItem('aerosync_custom_ice'));
+    if (customIce) iceServers.unshift(customIce);
 
     const isForced = localStorage.getItem('aerosync_force_relay') === 'true';
 
+    const signalingList = getSignalingList();
+    const signaling = signalingList[signalingIndex % signalingList.length];
+
     const peerOptions = {
         debug: 1,
+        host: signaling.host,
+        port: signaling.port,
+        path: signaling.path,
+        secure: signaling.secure,
+        pingInterval: 5000,
         config: {
             'iceServers': iceServers,
             'sdpSemantics': 'unified-plan',
-            'iceTransportPolicy': isForced ? 'relay' : 'all'
+            'iceTransportPolicy': isForced ? 'relay' : 'all',
+            'iceCandidatePoolSize': 4
         }
     };
 
-    peer = customId ? new Peer(customId, peerOptions) : new Peer(peerOptions);
+    const activePeer = customId ? new Peer(customId, peerOptions) : new Peer(peerOptions);
+    peer = activePeer;
+    const stillCurrent = () => peer === activePeer;
+
+    // Signaling failed: rotate to the next server / retry with backoff instead of giving up.
+    const retrySignaling = (reason) => {
+        if (!stillCurrent()) return;
+        if (signalingRetries >= MAX_SIGNALING_RETRIES) return false;
+        signalingRetries++;
+        signalingIndex++;
+        const delay = Math.min(1000 * signalingRetries, 5000);
+        const msg = `Signaling unreachable (${reason}). Retrying ${signalingRetries}/${MAX_SIGNALING_RETRIES}...`;
+        if (currentMode === 'client') { clientStatusText.textContent = msg; clientStatusMsg.style.color = '#e3b341'; }
+        else if (currentMode === 'host') { hostStatusText.textContent = msg; hostStatusMsg.style.color = '#e3b341'; }
+        setTimeout(() => { if (stillCurrent() && currentMode !== 'none') initPeer(customId, true); }, delay);
+        return true;
+    };
 
     peer.on('open', (id) => {
         signalingStatus = 'ok';
+        signalingRetries = 0;
         if (signalDot) signalDot.style.background = '#2ea043';
         if (hostSignalDot) hostSignalDot.style.background = '#2ea043';
         
@@ -172,30 +241,48 @@ function initPeer(customId = null) {
 
     peer.on('error', (err) => {
         console.error('PeerJS error:', err);
-        
-        // Critical Signaling Errors
-        if (err.type === 'network' || err.type === 'socket-error' || err.type === 'server-error') {
+
+        // Host ID collision: pick a fresh short ID and retry.
+        if (err.type === 'unavailable-id' && currentMode === 'host') {
+            initPeer(generateShortId(), true);
+            return;
+        }
+
+        // Client tried to reach a host that is not online / wrong ID.
+        if (err.type === 'peer-unavailable') {
+            clientStatusText.textContent = 'Host ID not found. Check the ID and that the host is online.';
+            clientStatusMsg.style.color = '#f85149';
+            connectBtn.disabled = false;
+            return;
+        }
+
+        // Critical signaling errors: rotate servers and retry automatically.
+        if (err.type === 'network' || err.type === 'socket-error' || err.type === 'socket-closed' || err.type === 'server-error') {
             signalingStatus = 'blocked';
             if (signalDot) signalDot.style.background = '#f85149';
             if (hostSignalDot) hostSignalDot.style.background = '#f85149';
+            if (retrySignaling(err.type)) return;
         }
 
+        const blockedMsg = 'Signaling server unreachable. Firewall/VPN may block it - set a custom signaling server in Network Settings.';
         if (currentMode === 'client') {
-            if (signalingStatus === 'blocked') {
-                clientStatusText.textContent = '🚨 Handshake Blocked by VPN.';
-            } else {
-                clientStatusText.textContent = `Error: ${err.type}`;
-            }
+            clientStatusText.textContent = signalingStatus === 'blocked' ? blockedMsg : `Error: ${err.type}`;
             clientStatusMsg.style.color = '#f85149';
         } else if (currentMode === 'host') {
-            const msg = signalingStatus === 'blocked' ? '🚨 Handshake Blocked' : `Error: ${err.type}`;
-            hostStatusText.textContent = msg;
+            hostStatusText.textContent = signalingStatus === 'blocked' ? blockedMsg : `Error: ${err.type}`;
             hostStatusMsg.style.color = '#f85149';
         }
     });
 
     peer.on('disconnected', () => {
-        peer.reconnect();
+        // Keep the same ID; retry until the signaling socket is back.
+        const p = peer;
+        const tryReconnect = (n) => {
+            if (!p || p !== peer || p.destroyed || !p.disconnected) return;
+            try { p.reconnect(); } catch (e) {}
+            if (n < 10) setTimeout(() => tryReconnect(n + 1), Math.min(1000 * (n + 1), 8000));
+        };
+        setTimeout(() => tryReconnect(0), 500);
     });
 
     // Handle incoming connections (Host Mode)
@@ -282,9 +369,10 @@ connectBtn.addEventListener('click', () => {
         return;
     }
 
-    if (signalingStatus === 'blocked') {
-        clientStatusText.textContent = 'Handshake blocked. Check VPN/Relay.';
-        clientStatusMsg.style.color = '#f85149';
+    if (!peer || peer.disconnected || !peer.open) {
+        clientStatusText.textContent = 'Not connected to signaling yet. Retrying...';
+        clientStatusMsg.style.color = '#e3b341';
+        if (peer && peer.disconnected) { try { peer.reconnect(); } catch (e) {} }
         return;
     }
 
@@ -297,11 +385,11 @@ connectBtn.addEventListener('click', () => {
     // Connection watchdog
     const connectionTimeout = setTimeout(() => {
         if (!dataConnection || !dataConnection.open) {
-            clientStatusText.textContent = 'Immediate block suspected. Check VPN/Relay.';
+            clientStatusText.textContent = 'Could not reach host. Enable Force Relay in Network Settings or check the ID.';
             clientStatusMsg.style.color = '#e3b341';
             connectBtn.disabled = false;
         }
-    }, 10000);
+    }, 20000);
     
     dataConnection.on('open', () => {
         clearTimeout(connectionTimeout);
