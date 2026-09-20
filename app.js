@@ -79,6 +79,20 @@ const hostIdInput = document.getElementById('host-id-input');
 const clientStatusMsg = document.getElementById('client-status-msg');
 const remoteVideo = document.getElementById('remote-video');
 const connectedIdDisplay = document.getElementById('connected-id-display');
+const hostKeyInput = document.getElementById('host-key-input');
+const saveDeviceCheck = document.getElementById('save-device-check');
+const deviceNameInput = document.getElementById('device-name-input');
+const autoConnectCheck = document.getElementById('autoconnect-check');
+const savedDevicesWrap = document.getElementById('saved-devices-wrap');
+const savedDevicesEl = document.getElementById('saved-devices');
+const hostUnregisteredBox = document.getElementById('host-unregistered');
+const hostRegisteredBox = document.getElementById('host-registered');
+const hostKeyDisplay = document.getElementById('host-key-display');
+const hostRegName = document.getElementById('host-reg-name');
+const hostDeviceNameInput = document.getElementById('host-device-name');
+const registerDeviceBtn = document.getElementById('register-device-btn');
+const unregisterDeviceBtn = document.getElementById('unregister-device-btn');
+const copyHostInfoBtn = document.getElementById('copy-host-info-btn');
 
 const webHostIdDisplay = document.getElementById('web-host-id-display');
 const startShareBtn = document.getElementById('start-share-btn');
@@ -111,6 +125,25 @@ function generateShortId() {
     return id.substring(0, 3) + '-' + id.substring(3, 6);
 }
 
+// ---- Device registration: no server/accounts, credentials live in this browser's localStorage ----
+const LS_HOST_REG = 'aerosync_host_reg', LS_DEVICES = 'aerosync_devices', LS_AUTO = 'aerosync_autoconnect', LS_LAST = 'aerosync_last_device';
+const lsGet = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v === null || v === undefined ? d : v; } catch (e) { return d; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
+function randomToken(len, alphabet) {
+    const a = new Uint32Array(len); crypto.getRandomValues(a);
+    return Array.from(a, n => alphabet[n % alphabet.length]).join('');
+}
+function getHostReg() { const r = lsGet(LS_HOST_REG, null); return r && r.id && r.key ? r : null; }
+function safeEqual(a, b) {
+    a = String(a || ''); b = String(b || '');
+    if (a.length !== b.length) return false;
+    let d = 0; for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    return d === 0;
+}
+let idRetries = 0, authFails = 0, authLockedUntil = 0, pendingClientId = null, pendingConn = null;
+let keepClientStatus = false;
+let autoRetry = null, autoRetryTimer = null, pendingAutoDevice = null;
+
 function showOverlay(overlay) {
     roleSelectionOverlay.classList.add('hidden');
     clientConnectionOverlay.classList.add('hidden');
@@ -129,10 +162,13 @@ btnRoleClient.addEventListener('click', () => {
 btnRoleHost.addEventListener('click', () => {
     currentMode = 'host';
     showOverlay(webHostOverlay);
-    initPeer(generateShortId());
+    const reg = getHostReg();
+    renderHostRegistration();
+    initPeer(reg ? reg.id : generateShortId());
 });
 
 clientBackBtn.addEventListener('click', () => {
+    cancelAutoRetry();
     resetApp();
 });
 
@@ -181,7 +217,7 @@ saveNetworkSettingsBtn.addEventListener('click', () => {
 
 function initPeer(customId = null, isRetry = false) {
     if (peer) { peer.destroy(); }
-    if (!isRetry) { signalingIndex = 0; signalingRetries = 0; }
+    if (!isRetry) { signalingIndex = 0; signalingRetries = 0; idRetries = 0; }
 
     const iceServers = [...COMMON_ICE_SERVERS];
     iceServers.unshift(...parseIceServers(localStorage.getItem('aerosync_custom_ice')));
@@ -233,6 +269,10 @@ function initPeer(customId = null, isRetry = false) {
         if (currentMode === 'client') {
             clientStatusText.textContent = 'AeroSync Ready.';
             connectBtn.disabled = false;
+            if (pendingAutoDevice) {
+                const d = pendingAutoDevice; pendingAutoDevice = null;
+                connectToHost(d.id, d.key, true);
+            }
         } else if (currentMode === 'host') {
             webHostIdDisplay.textContent = id;
             hostStatusText.textContent = 'AeroSync Ready.';
@@ -244,8 +284,21 @@ function initPeer(customId = null, isRetry = false) {
     peer.on('error', (err) => {
         console.error('PeerJS error:', err);
 
-        // Host ID collision: pick a fresh short ID and retry.
+        // Host ID in use. A registered ID may still be held by our previous session for ~a minute: keep retrying it.
         if (err.type === 'unavailable-id' && currentMode === 'host') {
+            const reg = getHostReg();
+            if (reg && customId === reg.id) {
+                if (idRetries < 12) {
+                    idRetries++;
+                    hostStatusText.textContent = `Reclaiming your registered ID (${idRetries}/12)...`;
+                    hostStatusMsg.style.color = '#e3b341';
+                    setTimeout(() => { if (stillCurrent() && currentMode === 'host') initPeer(customId, true); }, 4000);
+                } else {
+                    hostStatusText.textContent = 'Registered ID is in use by another session. Close other host windows and retry.';
+                    hostStatusMsg.style.color = '#f85149';
+                }
+                return;
+            }
             initPeer(generateShortId(), true);
             return;
         }
@@ -255,6 +308,7 @@ function initPeer(customId = null, isRetry = false) {
             clientStatusText.textContent = 'Host ID not found. Check the ID and that the host is online.';
             clientStatusMsg.style.color = '#f85149';
             connectBtn.disabled = false;
+            scheduleAutoRetry();
             return;
         }
 
@@ -290,17 +344,40 @@ function initPeer(customId = null, isRetry = false) {
     // Handle incoming connections (Host Mode)
     peer.on('connection', (conn) => {
         if (currentMode !== 'host') return;
-        
+
         conn.on('data', (data) => {
-            if (data.type === 'system' && data.action === 'request-stream') {
-                if (localStream) {
-                    hostStatusMsg.textContent = 'Client connected, sending stream...';
-                    hostStatusMsg.style.color = '#2ea043';
-                    const call = peer.call(data.clientId, localStream);
-                    handleActiveCall(call);
+            if (!data || data.type !== 'system' || data.action !== 'request-stream') return;
+
+            // Registered hosts require the Access Key; lock out guessing.
+            const reg = getHostReg();
+            if (reg) {
+                const locked = Date.now() < authLockedUntil;
+                if (locked || !safeEqual(data.key, reg.key)) {
+                    if (!locked && ++authFails >= 5) { authLockedUntil = Date.now() + 60000; authFails = 0; }
+                    hostStatusText.textContent = 'Rejected a connection with a wrong Access Key.';
+                    hostStatusMsg.style.color = '#e3b341';
+                    try { conn.send({ type: 'system', action: 'auth-failed', locked }); } catch (e) {}
+                    setTimeout(() => conn.close(), 400);
+                    return;
                 }
+                authFails = 0;
+            }
+
+            if (localStream) {
+                hostStatusText.textContent = 'Client connected, sending stream...';
+                hostStatusMsg.style.color = '#2ea043';
+                const call = peer.call(data.clientId, localStream);
+                handleActiveCall(call);
+            } else {
+                // Not sharing yet: remember the client and call it as soon as sharing starts.
+                pendingClientId = data.clientId; pendingConn = conn;
+                hostStatusText.textContent = 'Client is waiting - click Start Sharing.';
+                hostStatusMsg.style.color = '#58a6ff';
+                try { conn.send({ type: 'system', action: 'waiting' }); } catch (e) {}
             }
         });
+
+        conn.on('close', () => { if (pendingConn === conn) { pendingConn = null; pendingClientId = null; } });
     });
 
     // Handle incoming calls (Client Mode)
@@ -315,7 +392,7 @@ function initPeer(customId = null, isRetry = false) {
             showOverlay(sessionContainer);
             connectedIdDisplay.textContent = hostIdInput.value.trim();
             isConnected = true;
-            clientStatusMsg.textContent = 'Connected successfully.';
+            clientStatusText.textContent = 'Connected successfully.';
             
             if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
                 document.getElementById('mobile-controls').classList.remove('hidden');
@@ -333,13 +410,18 @@ function initPeer(customId = null, isRetry = false) {
 startShareBtn.addEventListener('click', async () => {
     try {
         localStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
-        hostStatusMsg.textContent = 'Sharing active. Waiting for client to connect...';
+        hostStatusText.textContent = 'Sharing active. Waiting for client to connect...';
         hostStatusMsg.style.color = '#58a6ff';
         startShareBtn.classList.add('hidden');
+        if (pendingClientId && peer && peer.open) {
+            hostStatusText.textContent = 'Client connected, sending stream...';
+            handleActiveCall(peer.call(pendingClientId, localStream));
+            pendingClientId = null; pendingConn = null;
+        }
         
         // If user manually stops sharing via browser UI
         localStream.getVideoTracks()[0].onended = () => {
-            hostStatusMsg.textContent = 'Screen sharing stopped.';
+            hostStatusText.textContent = 'Screen sharing stopped.';
             hostStatusMsg.style.color = '#8b949e';
             startShareBtn.classList.remove('hidden');
             if (mediaCall) mediaCall.close();
@@ -347,7 +429,7 @@ startShareBtn.addEventListener('click', async () => {
         };
     } catch (err) {
         console.error('Display capture error:', err);
-        hostStatusMsg.textContent = 'Permission denied for screen share.';
+        hostStatusText.textContent = 'Permission denied for screen share.';
         hostStatusMsg.style.color = '#f85149';
     }
 });
@@ -356,25 +438,33 @@ function handleActiveCall(call) {
     mediaCall = call;
     call.on('close', () => {
         if (localStream) {
-            hostStatusMsg.textContent = 'Client disconnected. Still sharing, waiting for new client...';
+            hostStatusText.textContent = 'Client disconnected. Still sharing, waiting for new client...';
             hostStatusMsg.style.color = '#58a6ff';
         }
     });
 }
 
-// Client Mode: Connect Button
-connectBtn.addEventListener('click', () => {
-    const hostId = hostIdInput.value.trim();
-    if (!hostId) {
-        clientStatusText.textContent = 'Please enter a valid Host ID';
-        clientStatusMsg.style.color = '#f85149';
-        return;
-    }
+// Client Mode: Connect
+function cancelAutoRetry() { autoRetry = null; clearTimeout(autoRetryTimer); }
+function scheduleAutoRetry() {
+    clearTimeout(autoRetryTimer);
+    if (!autoRetry) return;
+    autoRetryTimer = setTimeout(() => {
+        if (currentMode === 'client' && autoRetry && !isConnected) connectToHost(autoRetry.id, autoRetry.key, true);
+    }, 8000);
+}
+
+function connectToHost(hostId, key, isAuto = false) {
+    clearTimeout(autoRetryTimer);
+    autoRetry = isAuto ? { id: hostId, key } : null;
+    hostIdInput.value = hostId;
+    hostKeyInput.value = key || '';
 
     if (!peer || peer.disconnected || !peer.open) {
         clientStatusText.textContent = 'Not connected to signaling yet. Retrying...';
         clientStatusMsg.style.color = '#e3b341';
         if (peer && peer.disconnected) { try { peer.reconnect(); } catch (e) {} }
+        if (isAuto) scheduleAutoRetry();
         return;
     }
 
@@ -382,35 +472,139 @@ connectBtn.addEventListener('click', () => {
     clientStatusMsg.style.color = '#58a6ff';
     connectBtn.disabled = true;
 
-    dataConnection = peer.connect(hostId, { reliable: true });
-    
+    if (dataConnection) { try { dataConnection.close(); } catch (e) {} }
+    const conn = peer.connect(hostId, { reliable: true });
+    dataConnection = conn;
+
     // Connection watchdog
     const connectionTimeout = setTimeout(() => {
-        if (!dataConnection || !dataConnection.open) {
+        if (dataConnection === conn && !conn.open) {
             clientStatusText.textContent = 'Could not reach host. Network blocks direct connections: add a TURN server in Network Settings on BOTH devices (see help there), or check the ID.';
             clientStatusMsg.style.color = '#e3b341';
             connectBtn.disabled = false;
+            scheduleAutoRetry();
         }
     }, 20000);
-    
-    dataConnection.on('open', () => {
+
+    conn.on('open', () => {
         clearTimeout(connectionTimeout);
         clientStatusText.textContent = 'Requesting stream...';
         setTimeout(() => {
-            if (dataConnection && dataConnection.open) {
-                dataConnection.send({
-                    type: 'system',
-                    action: 'request-stream',
-                    clientId: peer.id
-                });
+            if (conn.open) {
+                conn.send({ type: 'system', action: 'request-stream', clientId: peer.id, key: key || '' });
             }
         }, 500);
     });
 
-    dataConnection.on('close', () => resetUI());
+    conn.on('data', (data) => {
+        if (!data || data.type !== 'system') return;
+        if (data.action === 'auth-failed') {
+            cancelAutoRetry();
+            keepClientStatus = true;
+            clientStatusText.textContent = data.locked ? 'Too many wrong keys. Wait a minute and retry.' : 'Wrong Access Key for this host.';
+            clientStatusMsg.style.color = '#f85149';
+            connectBtn.disabled = false;
+        } else if (data.action === 'waiting') {
+            clientStatusText.textContent = 'Host is online - waiting for the host to click Start Sharing...';
+            clientStatusMsg.style.color = '#58a6ff';
+        }
+    });
+
+    conn.on('close', () => { if (dataConnection === conn) resetUI(); });
+}
+
+connectBtn.addEventListener('click', () => {
+    const hostId = hostIdInput.value.trim();
+    const key = hostKeyInput.value.trim();
+    if (!hostId) {
+        clientStatusText.textContent = 'Please enter a valid Host ID';
+        clientStatusMsg.style.color = '#f85149';
+        return;
+    }
+    if (saveDeviceCheck.checked) saveDevice(hostId, key, deviceNameInput.value.trim());
+    connectToHost(hostId, key, false);
 });
 
-disconnectBtn.addEventListener('click', () => resetUI());
+// Saved devices list
+function saveDevice(id, key, name) {
+    const list = lsGet(LS_DEVICES, []);
+    const dev = { id, key, name: (name || id).slice(0, 40) };
+    const i = list.findIndex(d => d.id === id);
+    if (i >= 0) list[i] = dev; else list.push(dev);
+    lsSet(LS_DEVICES, list);
+    lsSet(LS_LAST, id);
+    renderSavedDevices();
+}
+
+function renderSavedDevices() {
+    const list = lsGet(LS_DEVICES, []);
+    savedDevicesEl.textContent = '';
+    savedDevicesWrap.classList.toggle('hidden', list.length === 0);
+    list.forEach(dev => {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.08);';
+        const label = document.createElement('span');
+        label.style.cssText = 'flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#c9d1d9;';
+        label.textContent = dev.name;
+        label.title = dev.id;
+        const go = document.createElement('button');
+        go.textContent = 'Connect';
+        go.className = 'menu-btn';
+        go.style.cssText = 'width:auto; padding:4px 10px;';
+        go.addEventListener('click', () => { lsSet(LS_LAST, dev.id); connectToHost(dev.id, dev.key, false); });
+        const del = document.createElement('button');
+        del.textContent = '\u2715';
+        del.title = 'Remove';
+        del.className = 'menu-btn';
+        del.style.cssText = 'width:auto; padding:4px 8px;';
+        del.addEventListener('click', () => {
+            lsSet(LS_DEVICES, lsGet(LS_DEVICES, []).filter(d => d.id !== dev.id));
+            if (lsGet(LS_LAST, null) === dev.id) localStorage.removeItem(LS_LAST);
+            renderSavedDevices();
+        });
+        row.append(label, go, del);
+        savedDevicesEl.appendChild(row);
+    });
+}
+
+autoConnectCheck.addEventListener('change', () => lsSet(LS_AUTO, autoConnectCheck.checked));
+
+// Host Mode: register / unregister this device
+function renderHostRegistration() {
+    const reg = getHostReg();
+    hostUnregisteredBox.classList.toggle('hidden', !!reg);
+    hostRegisteredBox.classList.toggle('hidden', !reg);
+    if (reg) { hostKeyDisplay.textContent = reg.key; hostRegName.textContent = `${reg.name} (${reg.id})`; }
+}
+
+registerDeviceBtn.addEventListener('click', () => {
+    if (localStream) { alert('Stop sharing first, then register.'); return; }
+    const reg = {
+        id: 'as-' + randomToken(10, 'abcdefghjkmnpqrstuvwxyz23456789'),
+        key: randomToken(10, 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'),
+        name: (hostDeviceNameInput.value.trim() || 'My device').slice(0, 40)
+    };
+    lsSet(LS_HOST_REG, reg);
+    renderHostRegistration();
+    initPeer(reg.id);
+});
+
+unregisterDeviceBtn.addEventListener('click', () => {
+    if (localStream) { alert('Stop sharing first, then unregister.'); return; }
+    if (!confirm('Unregister this device? Saved copies on other devices will stop working.')) return;
+    localStorage.removeItem(LS_HOST_REG);
+    renderHostRegistration();
+    initPeer(generateShortId());
+});
+
+copyHostInfoBtn.addEventListener('click', async () => {
+    const reg = getHostReg(); if (!reg) return;
+    try { await navigator.clipboard.writeText(`ID: ${reg.id}\nAccess Key: ${reg.key}`); copyHostInfoBtn.textContent = 'Copied'; }
+    catch (e) { copyHostInfoBtn.textContent = 'Copy failed - select the key manually'; }
+    setTimeout(() => { copyHostInfoBtn.textContent = 'Copy ID + Key'; }, 2000);
+});
+
+disconnectBtn.addEventListener('click', () => { cancelAutoRetry(); resetUI(); });
 
 function resetUI() {
     if (dataConnection) { dataConnection.close(); dataConnection = null; }
@@ -424,8 +618,8 @@ function resetUI() {
     if (currentMode === 'client') {
         showOverlay(clientConnectionOverlay);
         connectBtn.disabled = false;
-        clientStatusMsg.textContent = 'Disconnected.';
-        clientStatusMsg.style.color = '#8b949e';
+        if (keepClientStatus) { keepClientStatus = false; }
+        else { clientStatusText.textContent = 'Disconnected.'; clientStatusMsg.style.color = '#8b949e'; }
         removeControlListeners();
         setControlMode(true);
     }
@@ -444,7 +638,7 @@ function resetApp() {
     // reset Host UI specifically
     webHostIdDisplay.textContent = 'Generating...';
     startShareBtn.classList.add('hidden');
-    hostStatusMsg.textContent = 'Initializing...';
+    hostStatusText.textContent = 'Initializing...';
     hostStatusMsg.style.color = '#8b949e';
 }
 
@@ -848,3 +1042,15 @@ function removeControlListeners() {
     window.removeEventListener('keydown', handleKeyDown);
     window.removeEventListener('keyup', handleKeyUp);
 }
+
+// Startup: restore saved devices; optionally jump straight into client mode and auto-connect.
+renderSavedDevices();
+autoConnectCheck.checked = lsGet(LS_AUTO, false) === true;
+(function autoStart() {
+    if (!autoConnectCheck.checked) return;
+    const list = lsGet(LS_DEVICES, []);
+    const dev = list.find(d => d.id === lsGet(LS_LAST, null)) || list[list.length - 1];
+    if (!dev) return;
+    pendingAutoDevice = dev;
+    btnRoleClient.click();
+})();
