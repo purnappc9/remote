@@ -1,19 +1,8 @@
-// Firewall-friendly ICE list: STUN for direct paths, TURN over UDP/TCP 80 and TCP/TLS 443
-// so media can be relayed even when only web ports are open (corporate firewalls, VPNs, CGNAT).
-const OPEN_RELAY_USER = 'openrelayproject';
+// Built-in ICE servers are STUN only (direct/NAT-traversal). There is no free public TURN relay that
+// is reliable, so for networks that block direct connections add your own TURN in Network Settings
+// (Metered / Twilio / Cloudflare / coturn). Ports 443 (TCP/TLS) get through most corporate firewalls.
 const COMMON_ICE_SERVERS = [
-    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:global.stun.twilio.com:3478'] },
-    { urls: 'stun:openrelay.metered.ca:80' },
-    {
-        urls: [
-            'turn:openrelay.metered.ca:80',
-            'turn:openrelay.metered.ca:80?transport=tcp',
-            'turn:openrelay.metered.ca:443',
-            'turns:openrelay.metered.ca:443?transport=tcp'
-        ],
-        username: OPEN_RELAY_USER,
-        credential: OPEN_RELAY_USER
-    }
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:global.stun.twilio.com:3478'] }
 ];
 
 // Signaling servers tried in order. First entry is the public PeerJS cloud (wss on 443).
@@ -23,14 +12,28 @@ let signalingIndex = 0;
 let signalingRetries = 0;
 const MAX_SIGNALING_RETRIES = 6;
 
-// Parse "turn:user:pass@host:port[?transport=tcp]" (or plain stun:/turn: URL) into an RTCIceServer.
-function parseIceServer(raw) {
+// Parse one "turn:user:pass@host:port[?transport=tcp]" (or plain stun:/turn: URL) into an RTCIceServer.
+function parseIceUrl(raw) {
     raw = (raw || '').trim();
     const m = raw.match(/^(stuns?|turns?):(?:([^:@\/]+):([^@\/]+)@)?(.+)$/i);
     if (!m) return null;
     const server = { urls: `${m[1].toLowerCase()}:${m[4]}` };
     if (m[2]) { server.username = decodeURIComponent(m[2]); server.credential = decodeURIComponent(m[3]); }
     return server;
+}
+
+// Accepts: a JSON iceServers array (as given by Metered/Twilio/Cloudflare), or one turn:/stun: URL per line/comma.
+function parseIceServers(raw) {
+    raw = (raw || '').trim();
+    if (!raw) return [];
+    if (raw[0] === '[' || raw[0] === '{') {
+        try {
+            let j = JSON.parse(raw);
+            if (j && !Array.isArray(j)) j = j.iceServers || [j];
+            return j.filter(x => x && x.urls);
+        } catch (e) { return []; }
+    }
+    return raw.split(/[\s,]+/).map(parseIceUrl).filter(Boolean);
 }
 
 // Parse "host[:port][/path]" (prefix wss:// or ws:// optional) into PeerJS server options.
@@ -160,7 +163,7 @@ openNetworkSettingsBtns.forEach(btn => {
 
 saveNetworkSettingsBtn.addEventListener('click', () => {
     const server = customIceServerInput.value.trim();
-    if (server && parseIceServer(server)) {
+    if (server && parseIceServers(server).length) {
         localStorage.setItem('aerosync_custom_ice', server);
     } else {
         localStorage.removeItem('aerosync_custom_ice');
@@ -181,8 +184,7 @@ function initPeer(customId = null, isRetry = false) {
     if (!isRetry) { signalingIndex = 0; signalingRetries = 0; }
 
     const iceServers = [...COMMON_ICE_SERVERS];
-    const customIce = parseIceServer(localStorage.getItem('aerosync_custom_ice'));
-    if (customIce) iceServers.unshift(customIce);
+    iceServers.unshift(...parseIceServers(localStorage.getItem('aerosync_custom_ice')));
 
     const isForced = localStorage.getItem('aerosync_force_relay') === 'true';
 
@@ -385,7 +387,7 @@ connectBtn.addEventListener('click', () => {
     // Connection watchdog
     const connectionTimeout = setTimeout(() => {
         if (!dataConnection || !dataConnection.open) {
-            clientStatusText.textContent = 'Could not reach host. Enable Force Relay in Network Settings or check the ID.';
+            clientStatusText.textContent = 'Could not reach host. Network blocks direct connections: add a TURN server in Network Settings on BOTH devices (see help there), or check the ID.';
             clientStatusMsg.style.color = '#e3b341';
             connectBtn.disabled = false;
         }
