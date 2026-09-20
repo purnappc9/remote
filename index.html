@@ -44,21 +44,20 @@
         <div class="glass-panel">
             <button class="back-btn" id="network-back-btn">← Back</button>
             <h1>Network Settings</h1>
-            <p style="font-size: 0.85rem; margin-bottom: 20px; color: #8b949e;">A free TURN relay (ports 80/443, TCP+TLS) is built in and used automatically when a direct path is blocked. Add your own below for reliability.</p>
+            <p style="font-size: 0.85rem; margin-bottom: 20px; color: #8b949e;">Behind a strict office firewall or VPN, direct connections are blocked and you need a <strong>TURN relay</strong>. Set the same on both devices.</p>
             
             <div style="background: rgba(88, 166, 255, 0.1); border: 1px solid rgba(88, 166, 255, 0.2); padding: 12px; border-radius: 8px; font-size: 0.8rem; margin-bottom: 15px; text-align: left;">
                 <strong>💡 Get a FREE Relay Key:</strong>
                 <ol style="margin-top: 10px; padding-left: 20px;">
-                    <li>Go to <a href="https://www.metered.ca/tools/openrelay/" target="_blank" style="color: #58a6ff;">Metered OpenRelay</a></li>
-                    <li>Copy your <strong>TURN</strong> URL, username and credential</li>
-                    <li>Paste as <code>turn:user:pass@host:443</code> below and click Save.</li>
+                    <li>Create a free account at <a href="https://www.metered.ca/stun-turn" target="_blank" style="color: #58a6ff;">metered.ca</a> (or Twilio/Cloudflare/your own coturn)</li>
+                    <li>Copy the <strong>ICE servers JSON</strong> (or turn: URLs incl. port 443/TCP) and paste below, then Save.</li>
                 </ol>
             </div>
 
             <div class="settings-group">
                 <label>Custom TURN/STUN Server (Optional)</label>
-                <input type="text" id="custom-ice-server" placeholder="stun:stun.l.google.com:19302">
-                <p style="font-size: 0.7rem; color: #8b949e; margin-top: 5px;">Format: stun:host:port or turn:user:pass@host:port (use :443 or ?transport=tcp for strict firewalls)</p>
+                <textarea id="custom-ice-server" rows="4" placeholder="turn:user:pass@host:443 (one per line) or paste the JSON iceServers from your TURN provider" style="width:100%; box-sizing:border-box;"></textarea>
+                <p style="font-size: 0.7rem; color: #8b949e; margin-top: 5px;">Accepts JSON array, or lines like turn:user:pass@host:443?transport=tcp</p>
             </div>
 
             <div class="settings-group" style="margin-top: 15px;">
