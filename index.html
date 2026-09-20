@@ -31,6 +31,22 @@
                 <input type="text" id="host-id-input" placeholder="e.g. 1a2b-3c4d">
                 <button id="connect-btn">Connect</button>
             </div>
+            <div style="margin-top: 10px; text-align: left;">
+                <input type="password" id="host-key-input" placeholder="Access Key (from a registered host)" autocomplete="off" style="width:100%; box-sizing:border-box;">
+                <div style="display:flex; align-items:center; gap:8px; margin-top:8px; font-size:0.8rem; color:#c9d1d9;">
+                    <input type="checkbox" id="save-device-check" style="width:auto; margin:0;">
+                    <label for="save-device-check" style="margin:0;">Save this device</label>
+                    <input type="text" id="device-name-input" placeholder="Name (e.g. Office PC)" maxlength="40" style="flex:1; min-width:0;">
+                </div>
+                <div style="display:flex; align-items:center; gap:8px; margin-top:8px; font-size:0.8rem; color:#c9d1d9;">
+                    <input type="checkbox" id="autoconnect-check" style="width:auto; margin:0;">
+                    <label for="autoconnect-check" style="margin:0;">Auto-connect to the last saved device when this app opens</label>
+                </div>
+            </div>
+            <div id="saved-devices-wrap" class="hidden" style="margin-top:14px; text-align:left;">
+                <div style="font-size:0.8rem; color:#8b949e; margin-bottom:6px;">Saved devices</div>
+                <div id="saved-devices"></div>
+            </div>
             <div id="client-status-msg">
                 <span id="signal-dot" style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#8b949e; margin-right:5px;"></span>
                 <span id="client-status-text">Ready.</span>
@@ -82,6 +98,22 @@
             <h1>Share this Screen</h1>
             <p>Your Connection ID:</p>
             <div class="id-display-box" id="web-host-id-display">Generating...</div>
+            <div id="host-register-box" style="margin-bottom: 1rem; text-align: left; font-size: 0.8rem; color: #c9d1d9;">
+                <div id="host-unregistered">
+                    <input type="text" id="host-device-name" placeholder="Device name (e.g. Home PC)" maxlength="40" style="width:100%; box-sizing:border-box; margin-bottom:6px;">
+                    <button id="register-device-btn" class="menu-btn" style="width:100%;">Register this device</button>
+                    <p style="font-size:0.7rem; color:#8b949e; margin-top:5px;">Gives this device a permanent ID and a secret Access Key so other devices can save it and reconnect without a new ID each time.</p>
+                </div>
+                <div id="host-registered" class="hidden">
+                    <div>Registered as <strong id="host-reg-name"></strong></div>
+                    <div style="margin-top:4px;">Access Key: <code id="host-key-display"></code></div>
+                    <div style="display:flex; gap:8px; margin-top:8px;">
+                        <button id="copy-host-info-btn" class="menu-btn" style="flex:1;">Copy ID + Key</button>
+                        <button id="unregister-device-btn" class="menu-btn" style="flex:1;">Unregister</button>
+                    </div>
+                    <p style="font-size:0.7rem; color:#8b949e; margin-top:5px;">Anyone with this ID and Key can view and control this device. Sharing still needs you to click Start Sharing (browser rule).</p>
+                </div>
+            </div>
             <button id="start-share-btn" class="menu-btn menu-btn-primary hidden" style="margin-bottom: 1rem;">Start Sharing</button>
             <div id="host-status-msg">
                 <span id="host-signal-dot" style="display:inline-block; width:10px; height:10px; border-radius:50%; background:#8b949e; margin-right:5px;"></span>
