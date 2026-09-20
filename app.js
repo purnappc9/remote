@@ -125,6 +125,32 @@ function generateShortId() {
     return id.substring(0, 3) + '-' + id.substring(3, 6);
 }
 
+// ---- Diagnostics: on-screen connection log (signaling, ICE candidates, ICE state) to debug firewall/VPN issues ----
+const diagLines = [];
+function diag(msg) {
+    diagLines.push(`${new Date().toLocaleTimeString()} ${msg}`);
+    if (diagLines.length > 200) diagLines.shift();
+    document.querySelectorAll('.diag-log').forEach(el => { el.textContent = diagLines.join('\n'); el.scrollTop = el.scrollHeight; });
+}
+function watchPeerConnection(conn, label, tries = 0) {
+    const pc = conn && conn.peerConnection;
+    if (!pc) { if (tries < 25) setTimeout(() => watchPeerConnection(conn, label, tries + 1), 200); return; }
+    const counts = { host: 0, srflx: 0, prflx: 0, relay: 0 };
+    diag(`[${label}] connection started (policy: ${(pc.getConfiguration().iceTransportPolicy) || 'all'})`);
+    pc.addEventListener('icecandidate', (e) => {
+        if (e.candidate) { const t = e.candidate.type || 'unknown'; counts[t] = (counts[t] || 0) + 1; }
+        else diag(`[${label}] candidates gathered: host=${counts.host} srflx(STUN)=${counts.srflx} relay(TURN)=${counts.relay}` + (counts.srflx + counts.relay === 0 ? '  -> NO public/relay candidates: STUN/TURN unreachable (firewall/VPN)' : ''));
+    });
+    pc.addEventListener('iceconnectionstatechange', () => diag(`[${label}] ICE state: ${pc.iceConnectionState}` + (pc.iceConnectionState === 'failed' ? '  -> no working network path (need TURN on port 443)' : '')));
+    pc.addEventListener('icecandidateerror', (e) => diag(`[${label}] ICE server error ${e.errorCode || ''} ${e.url || ''} ${e.errorText || ''}`));
+}
+document.addEventListener('click', async (e) => {
+    const btn = e.target.closest && e.target.closest('.copy-diag');
+    if (!btn) return;
+    try { await navigator.clipboard.writeText(diagLines.join('\n')); btn.textContent = 'Copied'; } catch (err) { btn.textContent = 'Select the text and copy'; }
+    setTimeout(() => { btn.textContent = 'Copy log'; }, 2000);
+});
+
 // ---- Device registration: no server/accounts, credentials live in this browser's localStorage ----
 const LS_HOST_REG = 'aerosync_host_reg', LS_DEVICES = 'aerosync_devices', LS_AUTO = 'aerosync_autoconnect', LS_LAST = 'aerosync_last_device';
 const lsGet = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v === null || v === undefined ? d : v; } catch (e) { return d; } };
@@ -261,6 +287,7 @@ function initPeer(customId = null, isRetry = false) {
     };
 
     peer.on('open', (id) => {
+        diag(`signaling connected via ${signaling.host}:${signaling.port} as ${id}`);
         signalingStatus = 'ok';
         signalingRetries = 0;
         if (signalDot) signalDot.style.background = '#2ea043';
@@ -283,6 +310,7 @@ function initPeer(customId = null, isRetry = false) {
 
     peer.on('error', (err) => {
         console.error('PeerJS error:', err);
+        diag(`peer error: ${err.type} ${err.message || ''}`);
 
         // Host ID in use. A registered ID may still be held by our previous session for ~a minute: keep retrying it.
         if (err.type === 'unavailable-id' && currentMode === 'host') {
@@ -344,6 +372,8 @@ function initPeer(customId = null, isRetry = false) {
     // Handle incoming connections (Host Mode)
     peer.on('connection', (conn) => {
         if (currentMode !== 'host') return;
+        diag('incoming connection from a client');
+        watchPeerConnection(conn, 'host-data');
 
         conn.on('data', (data) => {
             if (!data || data.type !== 'system' || data.action !== 'request-stream') return;
@@ -385,6 +415,7 @@ function initPeer(customId = null, isRetry = false) {
         if (currentMode !== 'client') return;
         mediaCall = call;
         call.answer();
+        watchPeerConnection(call, 'client-media');
 
         call.on('stream', (stream) => {
             remoteStream = stream;
@@ -436,6 +467,7 @@ startShareBtn.addEventListener('click', async () => {
 
 function handleActiveCall(call) {
     mediaCall = call;
+    watchPeerConnection(call, 'host-media');
     call.on('close', () => {
         if (localStream) {
             hostStatusText.textContent = 'Client disconnected. Still sharing, waiting for new client...';
@@ -475,6 +507,8 @@ function connectToHost(hostId, key, isAuto = false) {
     if (dataConnection) { try { dataConnection.close(); } catch (e) {} }
     const conn = peer.connect(hostId, { reliable: true });
     dataConnection = conn;
+    diag(`connecting to ${hostId}...`);
+    watchPeerConnection(conn, 'client-data');
 
     // Connection watchdog
     const connectionTimeout = setTimeout(() => {
